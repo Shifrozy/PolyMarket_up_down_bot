@@ -6,6 +6,8 @@ Clean, beautiful terminal dashboard using Rich.
 """
 
 import time
+import threading
+import requests
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -19,12 +21,19 @@ from rich.columns import Columns
 from rich.align import Align
 from rich import box
 
+try:
+    from web3 import Web3
+    HAS_WEB3 = True
+except ImportError:
+    HAS_WEB3 = False
+
 from candle_feed import CandleFeed, Candle
 from trade_manager import TradeManager, Trade, TradeStatus, TradeDirection
 from strategy import StrategyEngine, BotState
 from config import (
     TRADE_AMOUNT, SHARE_PRICE, MAX_SLIPPAGE,
     COOLDOWN_MINUTES, PAPER_MODE, MAX_ENTRY_WAIT_MINUTES,
+    FUNDER_ADDRESS,
 )
 
 
@@ -44,6 +53,16 @@ class Dashboard:
         self.log_lines: list[str] = []
         self.max_log_lines = 12
         self._start_time = time.time()
+
+        # Wallet data cache (refreshed every 60s)
+        self._wallet_cache = {
+            "usdc": 0.0,
+            "matic": 0.0,
+            "positions": [],
+            "last_fetch": 0,
+        }
+        self._wallet_lock = threading.Lock()
+        self._WALLET_REFRESH_SEC = 60
 
     def add_log(self, message: str):
         """Add a log line to the activity feed."""
@@ -257,12 +276,175 @@ class Dashboard:
             border_style="bright_black",
         )
 
+    def _fetch_wallet_data(self):
+        """Fetch wallet balance and positions (cached, refreshes every 60s)."""
+        now = time.time()
+        if now - self._wallet_cache["last_fetch"] < self._WALLET_REFRESH_SEC:
+            return  # Use cached data
+
+        try:
+            if HAS_WEB3 and FUNDER_ADDRESS and not PAPER_MODE:
+                w3 = Web3(Web3.HTTPProvider("https://polygon-bor-rpc.publicnode.com"))
+                wallet = Web3.to_checksum_address(FUNDER_ADDRESS)
+
+                # USDC.e balance
+                usdc_abi = [{"constant":True,"inputs":[{"name":"","type":"address"}],
+                    "name":"balanceOf","outputs":[{"name":"","type":"uint256"}],
+                    "stateMutability":"view","type":"function"}]
+                usdc = w3.eth.contract(
+                    address=Web3.to_checksum_address("0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"),
+                    abi=usdc_abi
+                )
+                usdc_bal = usdc.functions.balanceOf(wallet).call() / 1e6
+
+                # MATIC balance
+                matic_bal = w3.eth.get_balance(wallet) / 1e18
+
+                with self._wallet_lock:
+                    self._wallet_cache["usdc"] = usdc_bal
+                    self._wallet_cache["matic"] = matic_bal
+
+                # Positions from data-api
+                try:
+                    r = requests.get(
+                        f"https://data-api.polymarket.com/positions?user={FUNDER_ADDRESS.lower()}",
+                        timeout=8
+                    )
+                    if r.status_code == 200:
+                        with self._wallet_lock:
+                            self._wallet_cache["positions"] = r.json()
+                except Exception:
+                    pass
+
+            with self._wallet_lock:
+                self._wallet_cache["last_fetch"] = now
+
+        except Exception:
+            with self._wallet_lock:
+                self._wallet_cache["last_fetch"] = now  # Avoid hammering on error
+
+    def _build_wallet_panel(self) -> Panel:
+        """Build the wallet balance and positions panel."""
+        self._fetch_wallet_data()
+
+        with self._wallet_lock:
+            usdc = self._wallet_cache["usdc"]
+            matic = self._wallet_cache["matic"]
+            positions = self._wallet_cache["positions"]
+
+        if PAPER_MODE:
+            lines = [
+                "[dim]Wallet info not available in Paper Mode[/dim]",
+            ]
+            return Panel(
+                "\n".join(lines),
+                title="[bold bright_cyan]👛 Wallet[/bold bright_cyan]",
+                border_style="bright_cyan",
+                height=6,
+            )
+
+        # Wallet address (truncated)
+        addr = FUNDER_ADDRESS
+        short_addr = f"{addr[:6]}...{addr[-4:]}" if len(addr) > 10 else addr
+
+        # Calculate total position value
+        total_value = sum(float(p.get("currentValue", 0)) for p in positions)
+        total_cost = sum(float(p.get("initialValue", 0)) for p in positions)
+        total_pnl = total_value - total_cost
+        pnl_color = "green" if total_pnl >= 0 else "red"
+
+        lines = [
+            f"[bold]Wallet:[/bold]      [dim]{short_addr}[/dim]",
+            f"[bold]USDC.e:[/bold]      [bold white]${usdc:.2f}[/bold white]",
+            f"[bold]MATIC:[/bold]       [dim]{matic:.4f}[/dim]",
+        ]
+
+        if positions:
+            lines.append(f"")
+            lines.append(f"[bold]Positions:[/bold]   {len(positions)} active")
+            lines.append(f"[bold]Holdings:[/bold]    [bold white]${total_value:.2f}[/bold white]")
+            lines.append(f"[bold]Pos. PnL:[/bold]    [{pnl_color}]${total_pnl:+.2f}[/{pnl_color}]")
+            lines.append(f"[bold]Total Equity:[/bold][bold yellow] ${usdc + total_value:.2f}[/bold yellow]")
+        else:
+            lines.append(f"")
+            lines.append(f"[dim]No active positions[/dim]")
+
+        height = max(8, 5 + len(positions) * 3)
+
+        return Panel(
+            "\n".join(lines),
+            title="[bold bright_cyan]👛 Wallet & Holdings[/bold bright_cyan]",
+            border_style="bright_cyan",
+        )
+
+    def _build_positions_table(self) -> Panel:
+        """Build the active positions table."""
+        with self._wallet_lock:
+            positions = self._wallet_cache["positions"]
+
+        table = Table(box=box.SIMPLE_HEAVY, show_header=True, header_style="bold bright_cyan")
+        table.add_column("Market", width=30, no_wrap=True)
+        table.add_column("Side", justify="center", width=5)
+        table.add_column("Shares", justify="right", width=7)
+        table.add_column("Avg $", justify="right", width=6)
+        table.add_column("Value", justify="right", width=7)
+        table.add_column("PnL", justify="right", width=8)
+        table.add_column("Status", justify="center", width=8)
+
+        if not positions:
+            table.add_row("[dim]No positions[/dim]", "", "", "", "", "", "")
+        else:
+            for p in positions:
+                title = p.get("title", "Unknown")
+                # Truncate long titles
+                if len(title) > 28:
+                    title = title[:25] + "..."
+
+                outcome = p.get("outcome", "?")
+                side_color = "green" if outcome == "Up" else "red" if outcome == "Down" else "white"
+                side_icon = "▲" if outcome == "Up" else "▼" if outcome == "Down" else "?"
+
+                size = float(p.get("size", 0))
+                avg_price = float(p.get("avgPrice", 0))
+                cur_value = float(p.get("currentValue", 0))
+                cash_pnl = float(p.get("cashPnl", 0))
+                pct_pnl = float(p.get("percentPnl", 0))
+                redeemable = p.get("redeemable", False)
+                cur_price = float(p.get("curPrice", 0))
+
+                pnl_color = "green" if cash_pnl >= 0 else "red"
+
+                if redeemable and cur_price >= 0.95:
+                    status = "[bold green]WIN ✅[/bold green]"
+                elif redeemable and cur_price <= 0.05:
+                    status = "[bold red]LOSS ❌[/bold red]"
+                elif redeemable:
+                    status = "[yellow]CLAIM[/yellow]"
+                else:
+                    status = "[dim]ACTIVE[/dim]"
+
+                table.add_row(
+                    title,
+                    f"[{side_color}]{side_icon}[/{side_color}]",
+                    f"{size:.0f}",
+                    f"${avg_price:.2f}",
+                    f"${cur_value:.2f}",
+                    f"[{pnl_color}]${cash_pnl:+.2f}[/{pnl_color}]",
+                    status,
+                )
+
+        return Panel(
+            table,
+            title="[bold bright_cyan]📊 Active Positions[/bold bright_cyan]",
+            border_style="bright_cyan",
+        )
+
     def _build_config_bar(self) -> Panel:
         """Build the configuration bar."""
         items = [
             f"Trade: ${TRADE_AMOUNT}",
             f"Price: ${SHARE_PRICE}",
-            f"Slip: {MAX_SLIPPAGE*100:.2f}%",
+            f"Slip: ${MAX_SLIPPAGE}",
             f"Cooldown: {COOLDOWN_MINUTES}min",
             f"Entry Wait: {MAX_ENTRY_WAIT_MINUTES}min",
         ]
@@ -284,6 +466,7 @@ class Dashboard:
             Layout(name="header", size=3),
             Layout(name="config", size=3),
             Layout(name="body"),
+            Layout(name="bottom"),
             Layout(name="log", size=self.max_log_lines + 4),
         )
 
@@ -305,6 +488,12 @@ class Dashboard:
             Layout(name="pnl"),
         )
 
+        # Bottom: Wallet + Positions
+        layout["bottom"].split_row(
+            Layout(name="wallet", ratio=1),
+            Layout(name="positions", ratio=2),
+        )
+
         # Render panels
         layout["header"].update(self._build_header())
         layout["config"].update(self._build_config_bar())
@@ -312,6 +501,8 @@ class Dashboard:
         layout["candles"].update(self._build_candle_history())
         layout["strategy"].update(self._build_strategy_panel())
         layout["pnl"].update(self._build_pnl_panel())
+        layout["wallet"].update(self._build_wallet_panel())
+        layout["positions"].update(self._build_positions_table())
         layout["log"].update(self._build_activity_log())
 
         return layout
