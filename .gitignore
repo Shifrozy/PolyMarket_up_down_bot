@@ -1,12 +1,37 @@
-# Credentials
+# Credentials (PRIVATE KEYS - NEVER PUSH!)
 .env
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[codz]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+venv/
+.venv/
+env/
 
-# Trade logs
+# Debug/utility scripts (not part of core bot)
+check_holdings.py
+check_negrisk.py
+check_tx.py
+check_trades.py
+check_live_status.py
+claim_position.py
+debug_markets.py
+debug_wallet.py
+deep_scan.py
+find_cond.py
+find_position.py
+swap_usdc.py
+setup_allowances.py
+redeem_winnings.py
+redeem_manager.py
+
+# Trade history (personal data)
 trade_history.json
 
 # IDE
