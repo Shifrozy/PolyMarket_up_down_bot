@@ -287,29 +287,37 @@ class StrategyEngine:
             return
 
         # Determine win/loss:
-        # If we bought UP → we WIN if candle closes GREEN (price went up)
-        # If we bought DOWN → we WIN if candle closes RED (price went down)
+        # If we bought UP token → we WIN if candle closes GREEN (price went up)
+        # If we bought DOWN token → we WIN if candle closes RED (price went down)
         candle_color = latest_closed.color
         won = False
 
         if trade.direction == TradeDirection.UP:
+            needed_color = "green"
             won = (candle_color == "green")
         else:  # DOWN
+            needed_color = "red"
             won = (candle_color == "red")
 
         self.trader.resolve_trade(trade, won)
 
+        # Clear, unambiguous log message
+        dir_label = trade.direction.value  # UP or DOWN
+        candle_icon = "🟢" if candle_color == "green" else "🔴"
+
         if won:
             self._log(
-                f"🎉 TRADE WON! {trade.direction_emoji} | "
-                f"P&L: +${trade.pnl:.2f} | Candle #{trade.candle_number}"
+                f"🎉 WIN! Bet {dir_label} (needed {needed_color}) → "
+                f"Candle closed {candle_icon}{candle_color.upper()} ✅ | "
+                f"P&L: +${trade.pnl:.2f} | #{trade.candle_number}"
             )
             # Win on any candle → reset and look for new signal
             self._reset_state()
         else:
             self._log(
-                f"💔 TRADE LOST! {trade.direction_emoji} | "
-                f"P&L: ${trade.pnl:.2f} | Candle #{trade.candle_number}"
+                f"💔 LOSS! Bet {dir_label} (needed {needed_color}) → "
+                f"Candle closed {candle_icon}{candle_color.upper()} ❌ | "
+                f"P&L: ${trade.pnl:.2f} | #{trade.candle_number}"
             )
             # Check progressive entry logic
             self._handle_progressive_loss(trade)

@@ -117,7 +117,24 @@ class TradeManager:
                 signature_type=SIGNATURE_TYPE,
                 funder=FUNDER_ADDRESS,
             )
-            self._client.set_api_creds(self._client.create_or_derive_api_creds())
+            # Derive or create API credentials for this wallet
+            try:
+                creds = self._client.create_or_derive_api_creds()
+                self._client.set_api_creds(creds)
+            except Exception as cred_err:
+                err_str = str(cred_err).lower()
+                if "400" in err_str or "not found" in err_str or "invalid" in err_str:
+                    raise ConnectionError(
+                        f"API key error for wallet {FUNDER_ADDRESS}.\n"
+                        f"This wallet may not be registered on Polymarket.\n"
+                        f"Fix: 1) Open https://polymarket.com and connect this wallet\n"
+                        f"     2) Accept terms and deposit any amount\n"
+                        f"     3) Run: python setup_allowances.py\n"
+                        f"     4) Then restart the bot\n"
+                        f"Original error: {cred_err}"
+                    )
+                raise
+
             self._client_initialized = True
             
             # Initialize RedeemManager
@@ -126,7 +143,21 @@ class TradeManager:
                 private_key=PRIVATE_KEY,
                 wallet_address=FUNDER_ADDRESS
             )
+        except ConnectionError:
+            raise  # Re-raise our detailed error
         except Exception as e:
+            err_str = str(e).lower()
+            if "400" in err_str:
+                raise ConnectionError(
+                    f"HTTP 400 from Polymarket API.\n"
+                    f"Wallet: {FUNDER_ADDRESS}\n"
+                    f"This wallet needs setup:\n"
+                    f"  1) Connect wallet at https://polymarket.com\n"
+                    f"  2) Accept terms & deposit USDC\n"
+                    f"  3) Run: python setup_allowances.py\n"
+                    f"  4) Restart bot\n"
+                    f"Error: {e}"
+                )
             raise ConnectionError(f"Failed to initialize CLOB client: {e}")
 
     def place_trade(
