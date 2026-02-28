@@ -181,15 +181,19 @@ class TradeManager:
         """
         self._init_client()
 
-        # Price check — Polymarket binary markets price UP+DOWN = $1.00
-        # So UP at $0.54 means DOWN is $0.46. Both are valid prices.
-        # We reject ONLY if price is extremely unfavorable (above max allowed)
+        # Price range restriction — only trade within the slippage band
+        # e.g. SHARE_PRICE=0.50, MAX_SLIPPAGE=0.05 → only trade $0.45 to $0.55
         target_price = SHARE_PRICE  # $0.50
-        max_price = target_price + MAX_SLIPPAGE  # e.g. $0.50 + $0.10 = $0.60 max
+        min_price = target_price - MAX_SLIPPAGE  # e.g. $0.50 - $0.05 = $0.45
+        max_price = target_price + MAX_SLIPPAGE  # e.g. $0.50 + $0.05 = $0.55
 
         if current_price > max_price:
-            self._last_error = f"Price {current_price:.3f} > max {max_price:.3f}"
+            self._last_error = f"Price ${current_price:.3f} above range (max ${max_price:.3f})"
             return None  # Price too high, skip
+
+        if current_price < min_price:
+            self._last_error = f"Price ${current_price:.3f} below range (min ${min_price:.3f})"
+            return None  # Price too low, skip
 
         # Use the actual market price for the order
         order_price = round(current_price, 2)
